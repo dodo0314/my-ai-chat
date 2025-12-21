@@ -1,16 +1,20 @@
 import streamlit as st
-import os
 import json
 import uuid
 import time
+import pandas as pd
+import io
 from datetime import datetime
 from openai import OpenAI
 
+# 구글 시트 연동 라이브러리
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 # ==========================================
-# [설정] API 키 및 모델 리스트
+# [설정]
 # ==========================================
 API_KEY = st.secrets["MY_API_KEY"]
-SAVE_FOLDER = "chat_multi_data"
 
 MODEL_OPTIONS = {
     "DeepSeek V3.2": "deepseek/deepseek-v3.2",
@@ -20,35 +24,70 @@ MODEL_OPTIONS = {
     "mimo": "xiaomi/mimo-v2-flash:free",
 }
 
-if not os.path.exists(SAVE_FOLDER):
-    os.makedirs(SAVE_FOLDER)
-
 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
 
 # ==========================================
-# [함수] 데이터 관리
+# [함수] 구글 시트 DB 관리 (핵심)
 # ==========================================
-def load_chat(filename):
-    if not filename: return []
-    filepath = os.path.join(SAVE_FOLDER, filename)
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
+@st.cache_resource
+def get_google_sheet():
+    # Secrets에서 키 정보를 가져옴
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = dict(st.secrets["gcp_service_account"]) # Secrets 내용을 딕셔너리로 변환
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    # 시트 이름으로 열기 (엑셀 파일명과 똑같아야 함)
+    sh = client.open("dodochat_db") 
+    return sh.sheet1
+
+def load_all_chats_from_sheet():
+    """시트에서 모든 채팅 목록을 불러옵니다."""
+    try:
+        sheet = get_google_sheet()
+        # 모든 데이터 가져오기 (리스트 형태)
+        data = sheet.get_all_records()
+        # 데이터가 없으면 빈 리스트 반환
+        if not data:
             return []
-    return []
+        
+        # 최신순 정렬 (timestamp 기준 내림차순)
+        # 엑셀에 저장될 때 문자열이므로 정렬이 필요하다면 여기서 처리
+        data.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
+        return data
+    except Exception as e:
+        st.error(f"DB 로드 실패: {e}")
+        return []
 
-def save_chat(filename, history):
-    filepath = os.path.join(SAVE_FOLDER, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+def save_chat_to_sheet(chat_id, title, history):
+    """채팅 내용을 시트에 저장(없으면 생성, 있으면 수정)"""
+    try:
+        sheet = get_google_sheet()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        history_json = json.dumps(history, ensure_ascii=False)
+        
+        # 시트에서 해당 chat_id가 있는 행 찾기
+        try:
+            cell = sheet.find(chat_id)
+            # 있으면 업데이트 (행 번호, 열 번호, 값)
+            row = cell.row
+            sheet.update_cell(row, 2, title) # B열: 제목
+            sheet.update_cell(row, 3, history_json) # C열: 대화내용
+            sheet.update_cell(row, 4, timestamp) # D열: 수정시간
+        except gspread.exceptions.CellNotFound:
+            # 없으면 새 행 추가 [ID, 제목, 내용, 시간]
+            sheet.append_row([chat_id, title, history_json, timestamp])
+            
+    except Exception as e:
+        st.warning(f"저장 중 오류 발생 (잠시 후 다시 시도됩니다): {e}")
 
-def get_chat_files():
-    if not os.path.exists(SAVE_FOLDER): return []
-    files = [f for f in os.listdir(SAVE_FOLDER) if f.endswith(".json")]
-    files.sort(key=lambda x: os.path.getmtime(os.path.join(SAVE_FOLDER, x)), reverse=True)
-    return files
+# ==========================================
+# [UI] 화면 구성
+# ==========================================
+st.set_page_config(page_title="DoDo Chat", page_icon="☁️", layout="wide")
+
+# 세션 초기화 (현재 선택된 채팅방 ID)
+if "current_chat_id" not in st.session_state:
+    st.session_state["current_chat_id"] = None
 
 def build_context(turn_history, slot_index):
     messages = []
@@ -61,139 +100,152 @@ def build_context(turn_history, slot_index):
             messages.append({"role": "assistant", "content": responses[str_idx]["text"]})
     return messages
 
-# ==========================================
-# [UI] 화면 구성
-# ==========================================
-st.set_page_config(page_title="멀티 그리드 챗봇", layout="wide")
-
+# 사이드바
 with st.sidebar:
-    st.title("🎛️ 멀티 컨트롤")
+    st.title("🎛️ 클라우드 컨트롤")
     
-    # 1. 초기화 로직
-    files = get_chat_files()
-    if not files:
-        init_file = f"New_Chat_{uuid.uuid4().hex[:4]}.json"
-        save_chat(init_file, [])
-        st.session_state["multi_chat_file"] = init_file
-        st.rerun()
-    
-    if "multi_chat_file" not in st.session_state:
-        st.session_state["multi_chat_file"] = files[0]
-
-    # 2. 화면 설정 (탭 모드 추가됨!)
+    # 1. 화면 설정
     st.subheader("1. 화면 설정")
-    num_screens = st.radio("화면 분할 개수", [1, 2, 3, 4], horizontal=True, index=0)
-    
-    # ⭐ [NEW] 모바일용 탭 모드 스위치
-    use_tabs = st.toggle("📱 모바일 탭 모드 (세로형)", value=False)
+    num_screens = st.radio("화면 분할", [1, 2, 3, 4], horizontal=True, index=0)
+    use_tabs = st.toggle("📱 모바일 탭 모드", value=False)
     
     st.divider()
     
-    # 3. 모델 배정
+    # 2. 모델 설정
     st.subheader("2. 모델 배정")
     selected_models = []
     model_names = list(MODEL_OPTIONS.keys())
-    
     for i in range(num_screens):
-        default_idx = i % len(model_names)
-        model_name = st.selectbox(
-            f"📺 화면 {i+1} 모델", 
-            model_names, 
-            index=default_idx,
-            key=f"model_select_{i}"
-        )
+        model_name = st.selectbox(f"화면 {i+1}", model_names, index=i % len(model_names), key=f"m_{i}")
         selected_models.append(MODEL_OPTIONS[model_name])
 
     st.divider()
     
-    # 4. 채팅방 목록
-    st.subheader("3. 채팅방 목록")
-    if st.button("➕ 새 채팅 만들기", use_container_width=True):
-        new_filename = f"New_Chat_{uuid.uuid4().hex[:4]}.json"
-        save_chat(new_filename, [])
-        st.session_state["multi_chat_file"] = new_filename
+    # 3. 채팅방 목록 (DB 연동)
+    st.subheader("3. 채팅방")
+    
+    # [새 채팅]
+    if st.button("➕ 새 채팅 시작", use_container_width=True):
+        new_id = str(uuid.uuid4())[:8]
+        new_title = f"새 대화 ({datetime.now().strftime('%m/%d %H:%M')})"
+        # 빈 대화로 DB에 즉시 생성
+        save_chat_to_sheet(new_id, new_title, [])
+        st.session_state["current_chat_id"] = new_id
         st.rerun()
 
-    files = get_chat_files()
-    if st.session_state["multi_chat_file"] not in files and files:
-         st.session_state["multi_chat_file"] = files[0]
-
-    if files:
-        current_file = st.radio("대화 선택", files, index=files.index(st.session_state["multi_chat_file"]) if st.session_state["multi_chat_file"] in files else 0, label_visibility="collapsed")
-        if current_file != st.session_state["multi_chat_file"]:
-            st.session_state["multi_chat_file"] = current_file
+    # DB에서 목록 불러오기
+    all_chats = load_all_chats_from_sheet()
+    
+    if all_chats:
+        chat_options = {chat['chat_id']: chat['title'] for chat in all_chats}
+        
+        # 현재 ID가 유효한지 확인
+        if st.session_state["current_chat_id"] not in chat_options:
+            st.session_state["current_chat_id"] = all_chats[0]['chat_id']
+            
+        selected_id = st.radio(
+            "목록", 
+            list(chat_options.keys()), 
+            format_func=lambda x: chat_options[x],
+            index=list(chat_options.keys()).index(st.session_state["current_chat_id"]) if st.session_state["current_chat_id"] else 0
+        )
+        
+        if selected_id != st.session_state["current_chat_id"]:
+            st.session_state["current_chat_id"] = selected_id
             st.rerun()
             
-        st.markdown("---")
-        st.caption("📝 이름 변경")
-        current_filename = st.session_state["multi_chat_file"]
-        new_name_input = st.text_input("파일명 수정", value=current_filename.replace(".json", ""), label_visibility="collapsed")
+        # [현재 대화 내용 가져오기]
+        current_chat_data = next((item for item in all_chats if item["chat_id"] == st.session_state["current_chat_id"]), None)
+        history = json.loads(current_chat_data['history']) if current_chat_data else []
+        current_title = current_chat_data['title'] if current_chat_data else "제목 없음"
         
-        if st.button("이름 변경 적용"):
-            old_path = os.path.join(SAVE_FOLDER, current_filename)
-            new_path = os.path.join(SAVE_FOLDER, f"{new_name_input}.json")
-            if os.path.exists(new_path) and new_path != old_path:
-                st.error("이미 존재하는 이름입니다.")
-            else:
-                os.rename(old_path, new_path)
-                st.session_state["multi_chat_file"] = f"{new_name_input}.json"
-                st.success("변경 완료!")
-                time.sleep(0.5)
-                st.rerun()
+        st.divider()
+        
+        # [제목 변경 기능]
+        new_name = st.text_input("제목 변경", value=current_title)
+        if new_name != current_title:
+             # 제목만 바뀌어도 DB 업데이트
+             save_chat_to_sheet(st.session_state["current_chat_id"], new_name, history)
+             st.rerun()
+
+        # ⭐ [요건 3] 엑셀 다운로드 기능 (xlsx)
+        st.caption("💾 내보내기")
+        if history:
+            # 엑셀용 데이터 프레임 생성
+            excel_data = []
+            for turn in history:
+                row = {"User Question": turn['user']}
+                for k, v in turn.get("responses", {}).items():
+                    row[f"AI_{k}_Model"] = v.get("model_name", "")
+                    row[f"AI_{k}_Answer"] = v.get("text", "")
+                excel_data.append(row)
+            
+            df = pd.DataFrame(excel_data)
+            
+            # 엑셀 바이너리 변환
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Chat History')
+                
+            st.download_button(
+                label="📥 엑셀(.xlsx)로 다운로드",
+                data=buffer.getvalue(),
+                file_name=f"{current_title}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+    else:
+        st.info("저장된 대화가 없습니다.")
+        history = []
+        current_title = "새 채팅"
+
 
 # 메인 화면
-safe_filename = st.session_state.get("multi_chat_file", "새 채팅")
-st.title(f"🧩 {safe_filename.replace('.json', '')}")
+st.title(f"☁️ {current_title}")
 
-history = load_chat(st.session_state.get("multi_chat_file"))
+# 탭 모드 or 분할 모드
+if use_tabs:
+    containers = st.tabs([f"화면 {i+1}" for i in range(num_screens)])
+else:
+    containers = st.columns(num_screens)
 
-# ==========================================
-# [기록 렌더링] 탭 모드 적용
-# ==========================================
+# 대화 렌더링
 for turn in history:
     with st.chat_message("user"):
         st.markdown(turn["user"])
     
-    # ⭐ 여기가 핵심 변경 포인트 (1)
-    if use_tabs:
-        containers = st.tabs([f"화면 {i+1}" for i in range(num_screens)])
-    else:
-        containers = st.columns(num_screens)
-
     for i in range(num_screens):
         with containers[i]:
             resp_data = turn.get("responses", {}).get(str(i))
             if resp_data:
                 tokens = resp_data.get('usage', {}).get('total_tokens', 'N/A')
-                st.caption(f"🤖 {resp_data.get('model_name', 'AI')} | 🪙 Tokens: {tokens}")
-                
+                st.caption(f"🤖 {resp_data.get('model_name', 'AI')} | 🪙 {tokens}")
                 if "Error" in resp_data['text']:
                     st.error(resp_data['text'])
                 else:
                     st.info(resp_data['text'])
 
-# ==========================================
-# [입력 및 실행] 탭 모드 적용
-# ==========================================
+# 입력
 if prompt := st.chat_input("질문하기..."):
     with st.chat_message("user"):
         st.markdown(prompt)
-    
-    # ⭐ 여기가 핵심 변경 포인트 (2)
+        
+    current_turn_responses = {}
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 컨테이너 다시 잡기 (입력 시)
     if use_tabs:
         containers = st.tabs([f"화면 {i+1}" for i in range(num_screens)])
     else:
         containers = st.columns(num_screens)
 
-    current_turn_responses = {}
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     for i in range(num_screens):
         with containers[i]:
             model_id = selected_models[i]
             display_name = [k for k, v in MODEL_OPTIONS.items() if v == model_id][0]
             
-            st.caption(f"🏃 Running: {display_name}...")
+            st.caption(f"🏃 {display_name}...")
             msg_placeholder = st.empty()
             full_text = ""
             usage_info = {}
@@ -213,13 +265,8 @@ if prompt := st.chat_input("질문하기..."):
                     if chunk.choices and chunk.choices[0].delta.content:
                         full_text += chunk.choices[0].delta.content
                         msg_placeholder.info(full_text + "▌")
-                    
                     if chunk.usage:
-                        usage_info = {
-                            "prompt_tokens": chunk.usage.prompt_tokens,
-                            "completion_tokens": chunk.usage.completion_tokens,
-                            "total_tokens": chunk.usage.total_tokens
-                        }
+                        usage_info = {"total_tokens": chunk.usage.total_tokens}
 
                 msg_placeholder.info(full_text)
                 
@@ -231,19 +278,14 @@ if prompt := st.chat_input("질문하기..."):
                     "usage": usage_info
                 }
             except Exception as e:
-                err_msg = f"Error: {e}"
-                msg_placeholder.error(err_msg)
+                msg_placeholder.error(f"Error: {e}")
                 current_turn_responses[str(i)] = {
-                    "timestamp": timestamp,
-                    "model_name": display_name,
-                    "model_id": model_id,
-                    "text": err_msg,
-                    "usage": {"error": str(e)}
+                    "text": f"Error: {e}",
+                    "model_name": display_name
                 }
 
-    if st.session_state.get("multi_chat_file"):
+    # ⭐ [요건 1, 2] 구글 시트에 즉시 저장
+    if st.session_state.get("current_chat_id"):
         new_turn = {"user": prompt, "responses": current_turn_responses}
         history.append(new_turn)
-
-        save_chat(st.session_state["multi_chat_file"], history)
-
+        save_chat_to_sheet(st.session_state["current_chat_id"], current_title, history)
