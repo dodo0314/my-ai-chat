@@ -290,11 +290,15 @@ if prompt := st.chat_input("질문하기..."):
                     "model_name": display_name
                 }
 
-    # ⭐ [요건 1, 2] 구글 시트에 즉시 저장
+  # ⭐ [요건 1, 2] 구글 시트에 즉시 저장
     if st.session_state.get("current_chat_id"):
         new_turn = {"user": prompt, "responses": current_turn_responses}
         history.append(new_turn)
         save_chat_to_sheet(st.session_state["current_chat_id"], current_title, history)
+        
+        # ⚠️ [추가할 코드] 저장 다 했으니 화면을 다시 그리세요!
+        st.rerun()
+
 
 
 
