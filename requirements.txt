@@ -1,2 +1,6 @@
 streamlit
 openai
+gspread
+oauth2client
+pandas
+openpyxl
