@@ -9,7 +9,7 @@ from openai import OpenAI
 # ==========================================
 # [설정] API 키 및 모델 리스트
 # ==========================================
-API_KEY = "여기에_질문자님의_API키를_붙여넣으세요"
+API_KEY = "MY_API_KEY"
 SAVE_FOLDER = "chat_multi_data"
 
 MODEL_OPTIONS = {
@@ -244,4 +244,5 @@ if prompt := st.chat_input("질문하기..."):
     if st.session_state.get("multi_chat_file"):
         new_turn = {"user": prompt, "responses": current_turn_responses}
         history.append(new_turn)
+
         save_chat(st.session_state["multi_chat_file"], history)
