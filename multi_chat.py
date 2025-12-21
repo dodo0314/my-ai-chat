@@ -20,7 +20,6 @@ MODEL_OPTIONS = {
     "DeepSeek V3.2": "deepseek/deepseek-v3.2",
     "Sonnet 4": "anthropic/claude-sonnet-4", 
     "Grok-4.1": "x-ai/grok-4.1-fast",
-    "mimo": "xiaomi/mimo-v2-flash:free",
     "Gemini 2.0_Free": "google/gemini-2.0-flash-exp:free",
     # [가성비] 막내
     "GPT-5 Mini (가성비)": "openai/gpt-5-mini",
@@ -296,6 +295,7 @@ if prompt := st.chat_input("질문하기..."):
         new_turn = {"user": prompt, "responses": current_turn_responses}
         history.append(new_turn)
         save_chat_to_sheet(st.session_state["current_chat_id"], current_title, history)
+
 
 
 
