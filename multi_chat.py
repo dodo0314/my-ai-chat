@@ -65,19 +65,21 @@ def save_chat_to_sheet(chat_id, title, history):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         history_json = json.dumps(history, ensure_ascii=False)
         
-        # 시트에서 해당 chat_id가 있는 행 찾기
-        try:
-            cell = sheet.find(chat_id)
-            # 있으면 업데이트 (행 번호, 열 번호, 값)
+        # [수정됨] 최신 gspread(6.0.0+) 대응: find는 이제 에러 대신 None을 줍니다.
+        cell = sheet.find(chat_id)
+        
+        if cell:
+            # ID를 찾았으면 -> 해당 줄 업데이트
             row = cell.row
-            sheet.update_cell(row, 2, title) # B열: 제목
-            sheet.update_cell(row, 3, history_json) # C열: 대화내용
-            sheet.update_cell(row, 4, timestamp) # D열: 수정시간
-        except gspread.exceptions.CellNotFound:
-            # 없으면 새 행 추가 [ID, 제목, 내용, 시간]
+            sheet.update_cell(row, 2, title)         # B열: 제목
+            sheet.update_cell(row, 3, history_json)  # C열: 대화내용
+            sheet.update_cell(row, 4, timestamp)     # D열: 수정시간
+        else:
+            # ID가 없으면(None) -> 새 줄 추가
             sheet.append_row([chat_id, title, history_json, timestamp])
             
     except Exception as e:
+        # 그 외 진짜 에러(연결 끊김 등)는 여기서 잡습니다.
         st.warning(f"저장 중 오류 발생 (잠시 후 다시 시도됩니다): {e}")
 
 # ==========================================
@@ -289,3 +291,4 @@ if prompt := st.chat_input("질문하기..."):
         new_turn = {"user": prompt, "responses": current_turn_responses}
         history.append(new_turn)
         save_chat_to_sheet(st.session_state["current_chat_id"], current_title, history)
+
