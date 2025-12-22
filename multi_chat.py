@@ -22,10 +22,11 @@ MODEL_OPTIONS = {
     "Grok-4.1": "x-ai/grok-4.1-fast",
     "Gemini 2.0_Free": "google/gemini-2.0-flash-exp:free",
     # [가성비] 막내
-    "GPT-5 Mini (가성비)": "openai/gpt-5-mini",
+    "GPT-5 Mini": "openai/gpt-5-mini",
     
     # ⭐ [끝판왕] 현재 지구상 최고 성능 (복잡한 추론용)
-    "GPT-5.2 (High-End)": "openai/gpt-5.2",
+    "GPT-5.2": "openai/gpt-5.2",
+    "Gemini 3.0": "google/gemini-3-pro-preview",
 }
 
 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
@@ -298,6 +299,7 @@ if prompt := st.chat_input("질문하기..."):
         
         # ⚠️ [추가할 코드] 저장 다 했으니 화면을 다시 그리세요!
         st.rerun()
+
 
 
 
