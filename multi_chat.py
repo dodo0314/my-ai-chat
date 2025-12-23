@@ -1,308 +1,298 @@
 import streamlit as st
 import json
 import uuid
-import time
-import pandas as pd
-import io
 from datetime import datetime
 from openai import OpenAI
-
-# 구글 시트 연동 라이브러리
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import pdfplumber  # PDF 읽기용
 
 # ==========================================
-# [설정]
+# [1] 설정 및 API 연결
 # ==========================================
-API_KEY = st.secrets["MY_API_KEY"]
+st.set_page_config(page_title="Cloud AI Research Lab", page_icon="☁️", layout="wide")
 
-MODEL_OPTIONS = {
-    "DeepSeek V3.2": "deepseek/deepseek-v3.2",
-    "Sonnet 4": "anthropic/claude-sonnet-4", 
-    "Grok-4.1": "x-ai/grok-4.1-fast",
-    "Gemini 2.0_Free": "google/gemini-2.0-flash-exp:free",
-    # [가성비] 막내
-    "GPT-5 Mini": "openai/gpt-5-mini",
+# API 키 및 구글 인증 (Secrets에서 가져오기)
+try:
+    API_KEY = st.secrets["MY_API_KEY"]
     
-    # ⭐ [끝판왕] 현재 지구상 최고 성능 (복잡한 추론용)
-    "GPT-5.2": "openai/gpt-5.2",
-    "Gemini 3.0": "google/gemini-3-pro-preview",
-}
+    # 구글 시트 인증
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = dict(st.secrets["gcp_service_account"]) # secrets를 dict로 변환
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client_gs = gspread.authorize(creds)
+    
+except Exception as e:
+    st.error(f"Secret 키 설정 오류: {e}")
+    st.stop()
 
+# OpenRouter 클라이언트
 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
 
+# 모델 라인업
+MODEL_OPTIONS = {
+    "Claude 3.5 Sonnet": "anthropic/claude-3.5-sonnet",
+    "GPT-4o": "openai/gpt-4o",
+    "Gemini 1.5 Pro": "google/gemini-pro-1.5", 
+    "DeepSeek V3": "deepseek/deepseek-chat",
+}
+
 # ==========================================
-# [함수] 구글 시트 DB 관리 (핵심)
+# [2] 구글 시트 함수 (안전성 강화)
 # ==========================================
-@st.cache_resource
 def get_google_sheet():
-    # Secrets에서 키 정보를 가져옴
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds_dict = dict(st.secrets["gcp_service_account"]) # Secrets 내용을 딕셔너리로 변환
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-    # 시트 이름으로 열기 (엑셀 파일명과 똑같아야 함)
-    sh = client.open("dodochat_db") 
-    return sh.sheet1
+    try:
+        return client_gs.open("dodochat_db").sheet1
+    except Exception as e:
+        st.error(f"구글 시트 'dodochat_db'를 찾을 수 없습니다. 이름과 공유설정을 확인하세요. ({e})")
+        st.stop()
 
 def load_all_chats_from_sheet():
-    """시트에서 모든 채팅 목록을 불러옵니다."""
+    sheet = get_google_sheet()
     try:
-        sheet = get_google_sheet()
-        # 모든 데이터 가져오기 (리스트 형태)
-        data = sheet.get_all_records()
-        # 데이터가 없으면 빈 리스트 반환
-        if not data:
-            return []
-        
-        # 최신순 정렬 (timestamp 기준 내림차순)
-        # 엑셀에 저장될 때 문자열이므로 정렬이 필요하다면 여기서 처리
-        data.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
-        return data
-    except Exception as e:
-        st.error(f"DB 로드 실패: {e}")
+        records = sheet.get_all_records()
+        # 최신순 정렬 (last_updated 기준)
+        records.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
+        return records
+    except:
         return []
 
 def save_chat_to_sheet(chat_id, title, history):
-    """채팅 내용을 시트에 저장(없으면 생성, 있으면 수정)"""
     try:
         sheet = get_google_sheet()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         history_json = json.dumps(history, ensure_ascii=False)
         
-        # [수정됨] 최신 gspread(6.0.0+) 대응: find는 이제 에러 대신 None을 줍니다.
+        # gspread 6.0.0 대응: find 사용
         cell = sheet.find(chat_id)
         
         if cell:
-            # ID를 찾았으면 -> 해당 줄 업데이트
             row = cell.row
-            sheet.update_cell(row, 2, title)         # B열: 제목
-            sheet.update_cell(row, 3, history_json)  # C열: 대화내용
-            sheet.update_cell(row, 4, timestamp)     # D열: 수정시간
+            sheet.update_cell(row, 2, title)
+            sheet.update_cell(row, 3, history_json)
+            sheet.update_cell(row, 4, timestamp)
         else:
-            # ID가 없으면(None) -> 새 줄 추가
             sheet.append_row([chat_id, title, history_json, timestamp])
             
     except Exception as e:
-        # 그 외 진짜 에러(연결 끊김 등)는 여기서 잡습니다.
-        st.warning(f"저장 중 오류 발생 (잠시 후 다시 시도됩니다): {e}")
+        st.warning(f"저장 중 일시적 오류 (데이터는 안전합니다): {e}")
 
 # ==========================================
-# [UI] 화면 구성
+# [3] UI 및 로직
 # ==========================================
-st.set_page_config(page_title="DoDo Chat", page_icon="☁️", layout="wide")
 
-# 세션 초기화 (현재 선택된 채팅방 ID)
+# 세션 초기화
 if "current_chat_id" not in st.session_state:
     st.session_state["current_chat_id"] = None
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+if "retry_trigger" not in st.session_state:
+    st.session_state["retry_trigger"] = False
+if "last_loaded_id" not in st.session_state:
+    st.session_state["last_loaded_id"] = None
 
-def build_context(turn_history, slot_index):
-    messages = []
-    messages.append({"role": "system", "content": f"당신은 {slot_index+1}번 화면의 AI입니다."})
-    for turn in turn_history:
-        messages.append({"role": "user", "content": turn["user"]})
-        responses = turn.get("responses", {})
-        str_idx = str(slot_index)
-        if str_idx in responses:
-            messages.append({"role": "assistant", "content": responses[str_idx]["text"]})
-    return messages
-
-# 사이드바
+# ----------------- [사이드바] -----------------
 with st.sidebar:
-    st.title("🎛️ 클라우드 컨트롤")
+    st.title("☁️ 클라우드 연구소")
     
-    # 1. 화면 설정
-    st.subheader("1. 화면 설정")
-    num_screens = st.radio("화면 분할", [1, 2, 3, 4], horizontal=True, index=0)
-    use_tabs = st.toggle("📱 모바일 탭 모드", value=False)
-    
-    st.divider()
-    
-    # 2. 모델 설정
-    st.subheader("2. 모델 배정")
+    # 1. 화면/모델 설정
+    num_screens = st.radio("화면 분할", [1, 2, 3], horizontal=True)
     selected_models = []
     model_names = list(MODEL_OPTIONS.keys())
     for i in range(num_screens):
-        model_name = st.selectbox(f"화면 {i+1}", model_names, index=i % len(model_names), key=f"m_{i}")
-        selected_models.append(MODEL_OPTIONS[model_name])
-
+        default_idx = i % len(model_names)
+        m = st.selectbox(f"화면 {i+1}", model_names, index=default_idx, key=f"m_{i}")
+        selected_models.append(MODEL_OPTIONS[m])
+    
     st.divider()
     
-    # 3. 채팅방 목록 (DB 연동)
-    st.subheader("3. 채팅방")
-    
-    # [새 채팅]
-    if st.button("➕ 새 채팅 시작", use_container_width=True):
-        new_id = str(uuid.uuid4())[:8]
-        new_title = f"새 대화 ({datetime.now().strftime('%m/%d %H:%M')})"
-        # 빈 대화로 DB에 즉시 생성
-        save_chat_to_sheet(new_id, new_title, [])
-        st.session_state["current_chat_id"] = new_id
-        st.rerun()
+    # 2. PDF/파일 업로드 (새로운 기능!)
+    st.subheader("📂 자료 업로드")
+    uploaded_file = st.file_uploader("PDF/TXT 파일을 드래그하세요", type=["pdf", "txt"])
+    context_text = ""
+    if uploaded_file:
+        try:
+            if uploaded_file.type == "application/pdf":
+                with pdfplumber.open(uploaded_file) as pdf:
+                    for page in pdf.pages:
+                        txt = page.extract_text()
+                        if txt: context_text += txt + "\n"
+            else:
+                context_text = uploaded_file.read().decode("utf-8")
+            st.success(f"문서 로드됨 ({len(context_text)}자)")
+        except Exception as e:
+            st.error(f"파일 읽기 실패: {e}")
 
-    # DB에서 목록 불러오기
+    st.divider()
+
+    # 3. 채팅방 관리 & 재시도
+    col_new, col_retry = st.columns(2)
+    with col_new:
+        if st.button("➕ 새 연구", use_container_width=True):
+            new_id = str(uuid.uuid4())[:8]
+            st.session_state["current_chat_id"] = new_id
+            st.session_state["history"] = []
+            st.session_state["last_loaded_id"] = new_id
+            # 시트에 미리 생성
+            save_chat_to_sheet(new_id, "새 연구 시작", [])
+            st.rerun()
+            
+    with col_retry:
+        if st.button("🔄 재시도", use_container_width=True):
+            if st.session_state["history"]:
+                st.session_state["retry_trigger"] = True
+                st.rerun()
+
+    # 4. 목록 불러오기 (구글 시트)
     all_chats = load_all_chats_from_sheet()
-    
     if all_chats:
         chat_options = {chat['chat_id']: chat['title'] for chat in all_chats}
         
-        # 현재 ID가 유효한지 확인
+        # 현재 ID 유효성 체크
         if st.session_state["current_chat_id"] not in chat_options:
-            st.session_state["current_chat_id"] = all_chats[0]['chat_id']
-            
+             if all_chats: st.session_state["current_chat_id"] = all_chats[0]['chat_id']
+        
         selected_id = st.radio(
-            "목록", 
-            list(chat_options.keys()), 
+            "기록 목록", list(chat_options.keys()),
             format_func=lambda x: chat_options[x],
             index=list(chat_options.keys()).index(st.session_state["current_chat_id"]) if st.session_state["current_chat_id"] else 0
         )
         
-        if selected_id != st.session_state["current_chat_id"]:
+        # 목록 클릭 시 로딩 (DB -> Session)
+        if selected_id != st.session_state["last_loaded_id"]:
             st.session_state["current_chat_id"] = selected_id
+            st.session_state["last_loaded_id"] = selected_id
+            
+            chat_data = next((item for item in all_chats if item["chat_id"] == selected_id), None)
+            if chat_data:
+                try:
+                    st.session_state["history"] = json.loads(chat_data['history'])
+                except:
+                    st.session_state["history"] = []
             st.rerun()
-            
-        # [현재 대화 내용 가져오기]
-        current_chat_data = next((item for item in all_chats if item["chat_id"] == st.session_state["current_chat_id"]), None)
-        history = json.loads(current_chat_data['history']) if current_chat_data else []
-        current_title = current_chat_data['title'] if current_chat_data else "제목 없음"
-        
-        st.divider()
-        
-        # [제목 변경 기능]
-        new_name = st.text_input("제목 변경", value=current_title)
-        if new_name != current_title:
-             # 제목만 바뀌어도 DB 업데이트
-             save_chat_to_sheet(st.session_state["current_chat_id"], new_name, history)
-             st.rerun()
 
-        # ⭐ [요건 3] 엑셀 다운로드 기능 (xlsx)
-        st.caption("💾 내보내기")
-        if history:
-            # 엑셀용 데이터 프레임 생성
-            excel_data = []
-            for turn in history:
-                row = {"User Question": turn['user']}
-                for k, v in turn.get("responses", {}).items():
-                    row[f"AI_{k}_Model"] = v.get("model_name", "")
-                    row[f"AI_{k}_Answer"] = v.get("text", "")
-                excel_data.append(row)
-            
-            df = pd.DataFrame(excel_data)
-            
-            # 엑셀 바이너리 변환
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Chat History')
-                
-            st.download_button(
-                label="📥 엑셀(.xlsx)로 다운로드",
-                data=buffer.getvalue(),
-                file_name=f"{current_title}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+# ----------------- [메인 화면] -----------------
+current_title = "새 연구"
+if all_chats and st.session_state["current_chat_id"]:
+    found = next((c for c in all_chats if c['chat_id'] == st.session_state["current_chat_id"]), None)
+    if found: current_title = found['title']
 
-    else:
-        st.info("저장된 대화가 없습니다.")
-        history = []
-        current_title = "새 채팅"
+st.subheader(f"🧪 {current_title}")
 
+history = st.session_state["history"]
 
-# 메인 화면
-st.title(f"☁️ {current_title}")
-
-# 탭 모드 or 분할 모드
-if use_tabs:
-    containers = st.tabs([f"화면 {i+1}" for i in range(num_screens)])
-else:
-    containers = st.columns(num_screens)
-
-# 대화 렌더링
+# 과거 대화 출력
 for turn in history:
     with st.chat_message("user"):
-        st.markdown(turn["user"])
+        st.write(turn["user"])
+    cols = st.columns(num_screens)
+    for i in range(num_screens):
+        with cols[i]:
+            resp = turn["responses"].get(str(i))
+            if resp:
+                st.caption(f"🤖 {resp.get('model_name')}")
+                st.info(resp.get("text"))
+
+st.divider()
+
+# ----------------- [입력 및 처리] -----------------
+prompt_to_process = None
+
+# 1. 재시도 트리거 확인
+if st.session_state["retry_trigger"]:
+    if history:
+        last_turn = history.pop() # 마지막 턴 제거
+        prompt_to_process = last_turn["user"] # 질문 복구
+        
+        # (중요) 만약 질문에 문서 내용이 포함되어 있었다면, 너무 기니까 
+        # 원본 파일이 있으면 다시 붙이고, 아니면 그냥 텍스트만 씀.
+        # 여기선 단순화를 위해 그대로 사용합니다.
+        
+        st.session_state["history"] = history
+        st.toast("🔄 재시도 중...")
+    st.session_state["retry_trigger"] = False
+
+# 2. 신규 입력 (Form 사용 - 줄바꿈 지원)
+with st.form(key="chat_form", clear_on_submit=True):
+    col_in, col_btn = st.columns([8, 1])
+    with col_in:
+        user_input = st.text_area("질문/지시사항 (Shift+Enter 줄바꿈)", height=100, key="input_text")
+    with col_btn:
+        st.write("")
+        st.write("")
+        submit_btn = st.form_submit_button("전송 🚀")
+
+if submit_btn and user_input:
+    prompt_to_process = user_input
+
+# ----------------- [AI 응답 생성] -----------------
+if prompt_to_process:
+    
+    # PDF 내용이 있으면 질문과 합치기 (보이지 않게 내부적으로만 처리할 수도 있지만, 확인을 위해 표시 추천)
+    final_prompt = prompt_to_process
+    if context_text:
+        final_prompt = f"다음 문서를 참고하여 답변해:\n[문서 시작]\n{context_text}\n[문서 끝]\n\n질문: {prompt_to_process}"
+        st.info(f"📎 문서({len(context_text)}자)가 프롬프트에 포함되었습니다.")
+    
+    # 화면 표시
+    with st.chat_message("user"):
+        st.write(prompt_to_process) # 화면엔 깔끔하게 질문만
+    
+    current_turn_responses = {}
+    cols = st.columns(num_screens)
+    
+    # 최근 N개 대화만 기억 (토큰 절약)
+    recent_history = history[-10:]
     
     for i in range(num_screens):
-        with containers[i]:
-            resp_data = turn.get("responses", {}).get(str(i))
-            if resp_data:
-                tokens = resp_data.get('usage', {}).get('total_tokens', 'N/A')
-                st.caption(f"🤖 {resp_data.get('model_name', 'AI')} | 🪙 {tokens}")
-                if "Error" in resp_data['text']:
-                    st.error(resp_data['text'])
-                else:
-                    st.info(resp_data['text'])
-
-# 입력
-if prompt := st.chat_input("질문하기..."):
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        
-    current_turn_responses = {}
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 컨테이너 다시 잡기 (입력 시)
-    if use_tabs:
-        containers = st.tabs([f"화면 {i+1}" for i in range(num_screens)])
-    else:
-        containers = st.columns(num_screens)
-
-    for i in range(num_screens):
-        with containers[i]:
+        with cols[i]:
             model_id = selected_models[i]
-            display_name = [k for k, v in MODEL_OPTIONS.items() if v == model_id][0]
+            d_name = [k for k, v in MODEL_OPTIONS.items() if v == model_id][0]
             
-            st.caption(f"🏃 {display_name}...")
-            msg_placeholder = st.empty()
+            st.caption(f"🏃 {d_name}...")
+            placeholder = st.empty()
             full_text = ""
-            usage_info = {}
             
-            context = build_context(history, i)
-            context.append({"role": "user", "content": prompt})
+            # 메시지 조립
+            messages = [{"role": "system", "content": "전문적인 리서치 어시스턴트입니다."}]
+            for turn in recent_history:
+                messages.append({"role": "user", "content": turn["user"]}) # 여기선 문서 내용은 생략하고 질문만 넣음 (절약)
+                if str(i) in turn["responses"]:
+                    messages.append({"role": "assistant", "content": turn["responses"][str(i)]["text"]})
+            
+            messages.append({"role": "user", "content": final_prompt})
             
             try:
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=context,
-                    stream=True,
-                    stream_options={"include_usage": True}
+                stream = client.chat.completions.create(
+                    model=model_id, messages=messages, stream=True
                 )
-                
-                for chunk in response:
+                for chunk in stream:
                     if chunk.choices and chunk.choices[0].delta.content:
-                        full_text += chunk.choices[0].delta.content
-                        msg_placeholder.info(full_text + "▌")
-                    if chunk.usage:
-                        usage_info = {"total_tokens": chunk.usage.total_tokens}
-
-                msg_placeholder.info(full_text)
+                        content = chunk.choices[0].delta.content
+                        full_text += content
+                        placeholder.info(full_text + "▌")
+                placeholder.info(full_text)
                 
                 current_turn_responses[str(i)] = {
-                    "timestamp": timestamp,
-                    "model_name": display_name,
-                    "model_id": model_id,
-                    "text": full_text,
-                    "usage": usage_info
+                    "model_name": d_name, "text": full_text
                 }
             except Exception as e:
-                msg_placeholder.error(f"Error: {e}")
-                current_turn_responses[str(i)] = {
-                    "text": f"Error: {e}",
-                    "model_name": display_name
-                }
+                placeholder.error(f"에러: {e}")
+                current_turn_responses[str(i)] = {"model_name": d_name, "text": f"Error: {e}"}
 
-  # ⭐ [요건 1, 2] 구글 시트에 즉시 저장
-    if st.session_state.get("current_chat_id"):
-        new_turn = {"user": prompt, "responses": current_turn_responses}
-        history.append(new_turn)
-        save_chat_to_sheet(st.session_state["current_chat_id"], current_title, history)
+    # 저장 (메모리 + 구글 시트)
+    if st.session_state["current_chat_id"]:
+        # 저장할 땐 '문서 내용이 포함된 긴 프롬프트' 대신 '사용자가 입력한 질문'만 저장할지 선택
+        # 여기선 가독성을 위해 '사용자 입력 질문(prompt_to_process)'만 저장합니다.
+        # (문서는 매번 새로 올리거나, 필요하면 final_prompt를 저장해도 됨)
+        new_turn = {"user": prompt_to_process, "responses": current_turn_responses}
         
-        # ⚠️ [추가할 코드] 저장 다 했으니 화면을 다시 그리세요!
+        st.session_state["history"].append(new_turn)
+        
+        # 제목 자동 설정 (첫 턴일 때)
+        save_title = current_title
+        if len(st.session_state["history"]) == 1:
+            save_title = prompt_to_process[:20] + "..."
+            
+        save_chat_to_sheet(st.session_state["current_chat_id"], save_title, st.session_state["history"])
         st.rerun()
-
-
-
-
-
-
-
