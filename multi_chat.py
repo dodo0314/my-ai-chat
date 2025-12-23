@@ -31,10 +31,9 @@ client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
 
 # 모델 라인업
 MODEL_OPTIONS = {
-    "Claude 3.5 Sonnet": "anthropic/claude-3.5-sonnet",
-    "GPT-4o": "openai/gpt-4o",
-    "Gemini 1.5 Pro": "google/gemini-pro-1.5", 
-    "DeepSeek V3": "deepseek/deepseek-chat",
+    "GPT 5.2": "openai/gpt-5.2",
+    "GPT 5-Mini": "openai/gpt-5-mini", 
+    "DeepSeek V3.2": "deepseek/deepseek-v3.2",
 }
 
 # ==========================================
@@ -296,3 +295,4 @@ if prompt_to_process:
             
         save_chat_to_sheet(st.session_state["current_chat_id"], save_title, st.session_state["history"])
         st.rerun()
+
