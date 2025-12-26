@@ -1,87 +1,85 @@
 import streamlit as st
-import google.generativeai as genai
+from openai import OpenAI  # OpenRouter는 OpenAI 라이브러리를 사용함
+import base64
+from io import BytesIO
 from PIL import Image
 
-# 1. 페이지 기본 설정
-st.set_page_config(
-    page_title="꼬질이 탐지기",
-    page_icon="🐶",
-    layout="centered"
-)
+# 1. 페이지 설정
+st.set_page_config(page_title="꼬질이 탐지기", page_icon="🐶", layout="centered")
+st.title("🐶 꼬질이 탐지기 (via OpenRouter)")
+st.write("AI가 분석하는 우리 강아지 미용 시급도!")
 
-# 제목 및 설명
-st.title("🐶 꼬질이 탐지기")
-st.write("우리 집 강아지, 지금 미용해야 할까요? AI 전문가가 냉정하게 판단해 드립니다!")
+# 2. 이미지 처리 함수 (OpenRouter용 Base64 변환)
+def encode_image(image):
+    buffered = BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# 2. API 키 설정 (Streamlit Secrets에서 가져오기)
-# 배포 후 Settings -> Secrets 에 GEMINI_API_KEY를 등록해야 합니다.
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
+# 3. API 키 설정 (Streamlit Secrets 사용)
+if "OPENROUTER_API_KEY" in st.secrets:
+    api_key = st.secrets["OPENROUTER_API_KEY"]
 else:
-    # 로컬 테스트용 또는 키 미설정 시
-    api_key = st.text_input("Gemini API 키를 입력하세요", type="password")
+    api_key = st.text_input("OpenRouter API 키를 입력하세요", type="password")
 
 if api_key:
-    genai.configure(api_key=api_key)
+    # OpenRouter 클라이언트 설정
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        default_headers={
+            "HTTP-Referer": "https://ggojil-detect.streamlit.app", # 나중에 실제 앱 주소로 변경
+            "X-Title": "Ggojil Detect App",
+        }
+    )
 
-    # 3. 이미지 업로드
-    uploaded_file = st.file_uploader("강아지의 정면 또는 측면 사진을 올려주세요 📸", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("강아지 사진 업로드 📸", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
-        # 이미지 화면에 표시
         image = Image.open(uploaded_file)
         st.image(image, caption='분석 대기 중...', use_container_width=True)
 
-        # 분석 버튼
         if st.button("🔍 꼬질도 진단 시작"):
-            with st.spinner("AI 원장님이 돋보기 쓰고 보는 중..."):
+            with st.spinner("OpenRouter를 통해 분석 중..."):
                 try:
-                    # 모델 호출 (속도 빠른 1.5 Flash 사용)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    # 이미지를 base64로 변환
+                    base64_image = encode_image(image)
+
+                    # 4. OpenRouter API 호출 (Chat Completion 방식)
+                    response = client.chat.completions.create(
+                        model="google/gemini-flash-1.5", # OpenRouter 모델명 확인 필요
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": """
+                                        너는 20년 경력의 반려견 미용 전문가야. 
+                                        이 사진을 보고 다음 형식으로 분석해줘:
+                                        
+                                        1. **꼬질 지수 (0~100점)**: 100점에 가까울수록 미용 시급.
+                                        2. **상태 분석**: 눈 가림, 털 엉킴 등.
+                                        3. **원장님의 한마디**: 재치 있는 독설 혹은 조언.
+                                        
+                                        출력은 마크다운 형식으로 해줘.
+                                        """
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    )
                     
-                    # 프롬프트: 페르소나와 분석 기준 설정
-                    prompt = """
-                    너는 20년 경력의 세계적인 반려견 미용 전문가야. 
-                    말투는 약간 까칠하고 직설적이지만, 강아지를 걱정하는 마음이 깔려있어.
-                    
-                    이 사진을 보고 다음 항목을 분석해줘:
-                    
-                    1. **꼬질 지수 (0~100점)**: 
-                       - 100점에 가까울수록 털이 엉망이고 미용이 시급한 상태.
-                       - 30점 이하는 깔끔한 상태.
-                       
-                    2. **상태 분석**:
-                       - 눈 주변 털이 시야를 가리는지
-                       - 털 엉킴이 보이는지
-                       - 빗질이 필요한지 등
-                       
-                    3. **원장님의 한마디**:
-                       - 견주에게 전하는 재치 있는 독설 혹은 칭찬.
-                       
-                    출력 형식은 반드시 아래와 같은 마크다운 포맷을 지켜줘:
-                    
-                    ## 📊 꼬질 지수: OO점
-                    ### 🩺 상태 진단
-                    (여기에 구체적인 분석 내용)
-                    
-                    ### 💬 원장님의 한마디
-                    "..."
-                    """
-                    
-                    # AI 응답 생성
-                    response = model.generate_content([prompt, image])
-                    st.markdown(response.text)
-                    
-                    # --- [Phase 2] 추후 지도 기능이 들어갈 자리 ---
-                    # 만약 점수가 높으면 주변 미용실 검색 버튼 노출 로직 추가 예정
-                    # ---------------------------------------------
+                    # 결과 출력
+                    result_text = response.choices[0].message.content
+                    st.markdown(result_text)
 
                 except Exception as e:
-                    st.error(f"오류가 발생했습니다: {e}")
-                    st.info("API 키가 정확한지, 혹은 이미지가 손상되지 않았는지 확인해주세요.")
+                    st.error(f"오류 발생: {e}")
 else:
-    st.info("👈 먼저 API 키를 설정해주세요. (배포 시 Secrets 설정 권장)")
-
-# 하단 푸터
-st.markdown("---")
-st.caption("Powered by Google Gemini 1.5 Flash & Streamlit")
+    st.info("API 키를 설정해주세요.")
