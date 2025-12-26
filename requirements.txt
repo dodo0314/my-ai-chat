@@ -3,3 +3,5 @@ openai
 gspread
 oauth2client
 pdfplumber
+google-generativeai
+Pillow
