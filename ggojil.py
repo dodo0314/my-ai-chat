@@ -46,7 +46,7 @@ if api_key:
 
                     # 4. OpenRouter API 호출 (Chat Completion 방식)
                     response = client.chat.completions.create(
-                        model="google/gemini-flash-1.5", # OpenRouter 모델명 확인 필요
+                        model="google/gemini-2.5-flash", # OpenRouter 모델명 확인 필요
                         messages=[
                             {
                                 "role": "user",
@@ -83,3 +83,4 @@ if api_key:
                     st.error(f"오류 발생: {e}")
 else:
     st.info("API 키를 설정해주세요.")
+
